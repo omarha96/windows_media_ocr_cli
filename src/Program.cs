@@ -10,40 +10,70 @@ using Windows.Media.Ocr;
 using Windows.Globalization;
 using System.CommandLine;
 using System.CommandLine.Completions;
-
+using System.Runtime.InteropServices.WindowsRuntime;
 
 var fileOption = new Option<string>(
-    name: "--file",
-    description: "The file to read and display on the console."
-) {
-    IsRequired = true
-};
-var languageOption = new Option<string>(
-    name: "--language",
-    description: "The language that should be used during OCR.",
-    getDefaultValue: () => "en-US"
-);
-var modeOption = new Option<OcrOutputMode>(
-    name: "--mode",
-    description: "The OCR output mode.",
-    getDefaultValue: () => OcrOutputMode.json
+ name: "--file",
+ description: "The file to read and display on the console."
 );
 
+var stdinOption = new Option<bool>(
+ name: "--stdin",
+ description: "Read image data from stdin.",
+ getDefaultValue: () => false
+);
+
+var languageOption = new Option<string>(
+ name: "--language",
+ description: "The language that should be used during OCR.",
+ getDefaultValue: () => "en-US"
+);
+var modeOption = new Option<OcrOutputMode>(
+ name: "--mode",
+ description: "The OCR output mode.",
+ getDefaultValue: () => OcrOutputMode.json
+);
 
 var rootCommand = new RootCommand("Start an OCR analysis using Windows local OcrEngine.")
 {
-    fileOption,
-    languageOption,
-    modeOption
+ fileOption,
+ stdinOption,
+ languageOption,
+ modeOption
 };
-rootCommand.SetHandler(Handler, fileOption, languageOption, modeOption);
+rootCommand.SetHandler(Handler, fileOption, stdinOption, languageOption, modeOption);
 
 return await rootCommand.InvokeAsync(args);
 
-
-static async Task Handler(string filepath, string language, OcrOutputMode mode)
+static async Task Handler(string filepath, bool useStdin, string language, OcrOutputMode mode)
 {
-    var result = await RecognizeAsync(filepath, language);
+    OcrResult result;
+
+    if (useStdin)
+    {
+        using var memoryStream = new MemoryStream();
+        await Console.OpenStandardInput().CopyToAsync(memoryStream);
+        memoryStream.Position = 0;
+
+        using var randomAccessStream = new InMemoryRandomAccessStream();
+        await randomAccessStream.WriteAsync(memoryStream.ToArray().AsBuffer());
+        randomAccessStream.Seek(0);
+
+        // Console.WriteLine(language);
+        result = await RecognizeAsync(randomAccessStream, language);
+    }
+    else if (!string.IsNullOrEmpty(filepath))
+    {
+        var path = Path.GetFullPath(filepath);
+        var storageFile = await StorageFile.GetFileFromPathAsync(path);
+        using var randomAccessStream = await storageFile.OpenReadAsync();
+        result = await RecognizeAsync(randomAccessStream, language);
+    }
+    else
+    {
+        throw new Exception("Either --file or --stdin must be provided.");
+    }
+
     var txt = "";
 
     if (mode == OcrOutputMode.json)
@@ -74,12 +104,8 @@ static async Task Handler(string filepath, string language, OcrOutputMode mode)
     Console.WriteLine(txt);
 }
 
-
-static async Task<OcrResult> RecognizeAsync(string filepath, string language)
+static async Task<OcrResult> RecognizeAsync(IRandomAccessStream randomAccessStream, string language)
 {
-    var path = Path.GetFullPath(filepath);
-    var storageFile = await StorageFile.GetFileFromPathAsync(path);
-    using var randomAccessStream = await storageFile.OpenReadAsync();
     var decoder = await BitmapDecoder.CreateAsync(randomAccessStream);
     using var softwareBitmap = await decoder.GetSoftwareBitmapAsync(
         BitmapPixelFormat.Bgra8,
